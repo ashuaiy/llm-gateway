@@ -27,6 +27,10 @@ func CacheMiddleware(c cache.Cache, ttl time.Duration, defaultProvider string) g
 	}
 
 	return func(ctx *gin.Context) {
+		if ctx.GetBool("budget_reservations_enabled") || ctx.GetBool("pii_restore") {
+			ctx.Next()
+			return
+		}
 		// Only cache POST requests to chat/completions (non-streaming)
 		if ctx.Request.Method != "POST" || !strings.HasSuffix(ctx.FullPath(), "chat/completions") {
 			ctx.Next()

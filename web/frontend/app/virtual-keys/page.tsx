@@ -57,11 +57,15 @@ export default function VirtualKeysPage() {
   const [name, setName] = useState("");
   const [budget, setBudget] = useState("");
   const [rateLimit, setRateLimit] = useState(defaultRateLimit);
+  const [tpm, setTpm] = useState("0");
+  const [streams, setStreams] = useState("0");
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<VirtualKey | null>(null);
   const [editName, setEditName] = useState("");
   const [editBudget, setEditBudget] = useState("");
   const [editRateLimit, setEditRateLimit] = useState("0");
+  const [editTpm, setEditTpm] = useState("0");
+  const [editStreams, setEditStreams] = useState("0");
   const [editProviderNames, setEditProviderNames] = useState<string[]>([]);
   const [role] = useState<string | null>(() => currentRole());
 
@@ -73,6 +77,7 @@ export default function VirtualKeysPage() {
     setName("");
     setBudget("");
     setRateLimit(defaultRateLimit);
+    setTpm("0"); setStreams("0");
   }
 
   async function handleCreate(e: React.FormEvent) {
@@ -83,6 +88,8 @@ export default function VirtualKeysPage() {
         name: name.trim(),
         ...(canSetBudget ? { budget_total: parseFloat(budget) || 0 } : {}),
         rate_limit: parseInt(rateLimit, 10) || 0,
+        token_limit_per_minute: Number(tpm),
+        max_concurrent_streams: Number(streams),
         rate_limit_window: 60,
       });
       toast.success("virtual key created", {
@@ -102,6 +109,8 @@ export default function VirtualKeysPage() {
     setEditName(key.name);
     setEditBudget(String(key.budget_total ?? 0));
     setEditRateLimit(String(key.rate_limit ?? 0));
+    setEditTpm(String(key.token_limit_per_minute ?? 0));
+    setEditStreams(String(key.max_concurrent_streams ?? 0));
     setEditProviderNames(parseProviders(key.providers));
     setEditOpen(true);
   }
@@ -124,6 +133,8 @@ export default function VirtualKeysPage() {
           name: editName.trim(),
           budget_total: parseFloat(editBudget) || 0,
           rate_limit: parseInt(editRateLimit, 10) || 0,
+          token_limit_per_minute: Number(editTpm),
+          max_concurrent_streams: Number(editStreams),
           rate_limit_window: 60,
           providers: editProviderNames,
         },
@@ -212,6 +223,12 @@ export default function VirtualKeysPage() {
                     min="0"
                   />
                 </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="k-tpm">tokens / min (0 = unlimited)</Label>
+                    <Input id="k-tpm" type="number" min="0" max="1000000000" value={tpm} onChange={e => setTpm(e.target.value)} />
+                    <Label htmlFor="k-streams">concurrent streams (0 = unlimited)</Label>
+                    <Input id="k-streams" type="number" min="0" max="1000000" value={streams} onChange={e => setStreams(e.target.value)} />
+                  </div>
                 <SheetFooter className="mt-auto flex-row gap-2 border-t border-border pt-4">
                   <Button
                     type="button"
@@ -262,6 +279,11 @@ export default function VirtualKeysPage() {
               </div>
             </div>
             <div className="space-y-2">
+              <Label htmlFor="ek-tpm">tokens / min (0 = unlimited)</Label>
+              <Input id="ek-tpm" type="number" min="0" max="1000000000" value={editTpm} onChange={e => setEditTpm(e.target.value)} />
+              <Label htmlFor="ek-streams">concurrent streams (0 = unlimited)</Label>
+              <Input id="ek-streams" type="number" min="0" max="1000000" value={editStreams} onChange={e => setEditStreams(e.target.value)} />
+              <p className="text-xs text-muted-foreground">Limits require reservation mode. TPM reserves estimated usage at admission.</p>
               <Label>bound providers</Label>
               <div className="rounded-sm border border-border bg-background/40 p-3 font-mono text-[12px]">
                 <button

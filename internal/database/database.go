@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/warm3snow/llm-gateway/internal/metrics"
+	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -33,6 +34,8 @@ func Connect(cfg *Config) error {
 	var dialector gorm.Dialector
 
 	switch cfg.Driver {
+	case "mysql":
+		dialector = mysql.Open(cfg.DSN)
 	case "postgres":
 		dialector = postgres.Open(cfg.DSN)
 	case "sqlite":

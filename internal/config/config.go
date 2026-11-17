@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -111,11 +112,19 @@ type RedisConfig struct {
 
 // BudgetConfig controls virtual-key budget accounting.
 type BudgetConfig struct {
-	AsyncEnabled  bool          `mapstructure:"asyncEnabled" json:"asyncEnabled" yaml:"asyncEnabled"`
-	QueueSize     int           `mapstructure:"queueSize" json:"queueSize" yaml:"queueSize"`
-	BatchSize     int           `mapstructure:"batchSize" json:"batchSize" yaml:"batchSize"`
-	FlushInterval time.Duration `mapstructure:"flushInterval" json:"flushInterval" yaml:"flushInterval"`
-	FlushTimeout  time.Duration `mapstructure:"flushTimeout" json:"flushTimeout" yaml:"flushTimeout"`
+	ReservationRetention        time.Duration `mapstructure:"reservationRetention" json:"reservationRetention" yaml:"reservationRetention"`
+	ReconciliationStaleAfter    time.Duration `mapstructure:"reconciliationStaleAfter" json:"reconciliationStaleAfter" yaml:"reconciliationStaleAfter"`
+	WorkerConcurrency           int           `mapstructure:"workerConcurrency" json:"workerConcurrency" yaml:"workerConcurrency"`
+	DeliveryBatchSize           int           `mapstructure:"deliveryBatchSize" json:"deliveryBatchSize" yaml:"deliveryBatchSize"`
+	ReservationEnabled          bool          `mapstructure:"reservationEnabled" json:"reservationEnabled" yaml:"reservationEnabled"`
+	ReservationRedis            RedisConfig   `mapstructure:"reservationRedis" json:"reservationRedis" yaml:"reservationRedis"`
+	ReservationDefaultMaxTokens int           `mapstructure:"reservationDefaultMaxTokens" json:"reservationDefaultMaxTokens" yaml:"reservationDefaultMaxTokens"`
+	ReservationMaxOutputTokens  int           `mapstructure:"reservationMaxOutputTokens" json:"reservationMaxOutputTokens" yaml:"reservationMaxOutputTokens"`
+	AsyncEnabled                bool          `mapstructure:"asyncEnabled" json:"asyncEnabled" yaml:"asyncEnabled"`
+	QueueSize                   int           `mapstructure:"queueSize" json:"queueSize" yaml:"queueSize"`
+	BatchSize                   int           `mapstructure:"batchSize" json:"batchSize" yaml:"batchSize"`
+	FlushInterval               time.Duration `mapstructure:"flushInterval" json:"flushInterval" yaml:"flushInterval"`
+	FlushTimeout                time.Duration `mapstructure:"flushTimeout" json:"flushTimeout" yaml:"flushTimeout"`
 }
 
 // LoggingConfig 日志配置
@@ -174,8 +183,10 @@ func LoadConfig(configPath string) (*Config, error) {
 
 	// 读取配置
 	if err := v.ReadInConfig(); err != nil {
-		// 任何错误都使用默认值
-		fmt.Println("Config file not found or failed to read, using defaults and environment variables:", err)
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("cannot read configuration: %w", err)
+		}
 	}
 
 	// 解析配置
@@ -205,6 +216,16 @@ func LoadConfig(configPath string) (*Config, error) {
 
 // setDefaults 设置默认配置
 func setDefaults(v *viper.Viper) {
+	v.SetDefault("budget.reservationRetention", 24*time.Hour)
+	v.SetDefault("budget.reconciliationStaleAfter", 10*time.Minute)
+	v.SetDefault("budget.workerConcurrency", 4)
+	v.SetDefault("budget.deliveryBatchSize", 100)
+	v.SetDefault("budget.reservationEnabled", false)
+	v.SetDefault("budget.reservationRedis.addr", "localhost:6379")
+	v.SetDefault("budget.reservationRedis.password", "")
+	v.SetDefault("budget.reservationRedis.db", 0)
+	v.SetDefault("budget.reservationDefaultMaxTokens", 1024)
+	v.SetDefault("budget.reservationMaxOutputTokens", 8192)
 	v.SetDefault("server.host", "0.0.0.0")
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.readTimeout", 60*time.Second)
@@ -266,6 +287,12 @@ func setDefaults(v *viper.Viper) {
 
 // validateConfig 验证配置
 func validateConfig(cfg *Config) error {
+	if cfg.Budget.ReservationEnabled && (cfg.Budget.ReservationRetention < time.Minute || cfg.Budget.WorkerConcurrency < 1 || cfg.Budget.WorkerConcurrency > 32 || cfg.Budget.DeliveryBatchSize < 1 || cfg.Budget.DeliveryBatchSize > 1000 || cfg.Budget.ReconciliationStaleAfter < 3*time.Minute || cfg.Budget.ReconciliationStaleAfter <= time.Duration(cfg.Gateway.MaxRequestTimeout)*time.Millisecond+time.Minute) {
+		return fmt.Errorf("invalid reservation retention, worker or stale reconciliation configuration")
+	}
+	if cfg.Budget.ReservationEnabled && (cfg.Budget.ReservationRedis.Addr == "" || cfg.Budget.ReservationDefaultMaxTokens <= 0 || cfg.Budget.ReservationMaxOutputTokens < cfg.Budget.ReservationDefaultMaxTokens || cfg.Budget.ReservationMaxOutputTokens > 1_000_000) {
+		return fmt.Errorf("invalid budget reservation configuration")
+	}
 	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("invalid server port: %d", cfg.Server.Port)
 	}

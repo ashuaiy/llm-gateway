@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	pathpkg "path"
 	"strings"
@@ -28,7 +29,7 @@ func GuardrailMiddleware(manager *guardrail.GuardrailManager) gin.HandlerFunc {
 		var body []byte
 		if c.Request.Body != nil {
 			var err error
-			body, err = io.ReadAll(c.Request.Body)
+			body, err = io.ReadAll(io.LimitReader(c.Request.Body, (1<<20)+1))
 			if err != nil {
 				c.AbortWithStatusJSON(http.StatusBadRequest, types.ErrorResponse{
 					Message: "Failed to read request body",
@@ -36,9 +37,17 @@ func GuardrailMiddleware(manager *guardrail.GuardrailManager) gin.HandlerFunc {
 				})
 				return
 			}
+			if len(body) > 1<<20 {
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, types.ErrorResponse{Message: "Guardrail request exceeds 1 MiB", Type: "invalid_request_error"})
+				return
+			}
 			c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
 		}
 
+		if !json.Valid(body) {
+			c.AbortWithStatusJSON(http.StatusBadRequest, types.ErrorResponse{Type: "invalid_request_error", Message: "Invalid JSON request"})
+			return
+		}
 		payload := guardrailPayload(body)
 		result, err := manager.ValidateRequest(payload)
 		if err != nil {
@@ -49,11 +58,34 @@ func GuardrailMiddleware(manager *guardrail.GuardrailManager) gin.HandlerFunc {
 			})
 			return
 		}
+		if result != nil && len(result.Actions) > 0 {
+			slog.InfoContext(c.Request.Context(), "guardrail_decision", "trace_id", c.GetString("trace_id"), "virtual_key_id", GetVirtualKeyID(c), "actions", result.Actions, "rule_ids", result.Findings, "passed", result.Passed)
+		}
 		if result != nil && !result.Passed {
 			abortWithGuardrailBlocked(c, "Request blocked by guardrail")
 			return
 		}
+		if result != nil && result.MaskedContent != "" {
+			body = []byte(result.MaskedContent)
+		} else {
+			// Forward the exact parsed value we screened. Duplicate JSON keys can
+			// otherwise merge differently when decoded into downstream Go structs.
+			var err error
+			body, err = json.Marshal(payload)
+			if err != nil {
+				c.AbortWithStatusJSON(400, types.ErrorResponse{Message: "Invalid JSON request", Type: "invalid_request_error"})
+				return
+			}
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		c.Request.ContentLength = int64(len(body))
+		c.Request.Header.Del("Content-Length")
 
+		if result != nil && len(result.Replacements) > 0 {
+			c.Set("pii_restore", true)
+			writeRestoredResponse(c, result.Replacements)
+			return
+		}
 		c.Next()
 	}
 }
@@ -93,7 +125,9 @@ func guardrailPayload(body []byte) any {
 		return ""
 	}
 	var payload any
-	if json.Unmarshal(body, &payload) == nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&payload) == nil {
 		return payload
 	}
 	return string(body)

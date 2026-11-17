@@ -69,6 +69,12 @@ func (s *VirtualKeyService) Create(tenantID uint, req *models.VirtualKeyRequest,
 	if vk.RateLimitWindow == 0 {
 		vk.RateLimitWindow = 60
 	}
+	if req.TokenLimitPerMinute != nil {
+		vk.TokenLimitPerMinute = *req.TokenLimitPerMinute
+	}
+	if req.MaxConcurrentStreams != nil {
+		vk.MaxConcurrentStreams = *req.MaxConcurrentStreams
+	}
 
 	if req.Providers != nil && len(req.Providers) > 0 {
 		// Store as comma-separated string for simplicity
@@ -184,6 +190,12 @@ func (s *VirtualKeyService) Update(tenantID, id uint, req *models.VirtualKeyRequ
 	if req.RateLimitWindow > 0 {
 		vk.RateLimitWindow = req.RateLimitWindow
 	}
+	if req.TokenLimitPerMinute != nil {
+		vk.TokenLimitPerMinute = *req.TokenLimitPerMinute
+	}
+	if req.MaxConcurrentStreams != nil {
+		vk.MaxConcurrentStreams = *req.MaxConcurrentStreams
+	}
 	if req.Metadata != "" {
 		vk.Metadata = req.Metadata
 	}
@@ -228,22 +240,24 @@ func (s *VirtualKeyService) TrackUsage(id uint, cost float64) error {
 // ToResponse converts a VirtualKey to VirtualKeyResponse
 func (s *VirtualKeyService) ToResponse(vk *models.VirtualKey, fullKey string) *models.VirtualKeyResponse {
 	resp := &models.VirtualKeyResponse{
-		ID:                vk.ID,
-		TenantID:          vk.TenantID,
-		CreatedByUserID:   vk.CreatedByUserID,
-		CreatedByUsername: vk.CreatedByUsername,
-		Name:              vk.Name,
-		KeyHashPrefix:     vk.HashedKey + "...",
-		BudgetTotal:       vk.BudgetTotal,
-		BudgetUsed:        vk.BudgetUsed,
-		BudgetRemaining:   vk.BudgetTotal - vk.BudgetUsed,
-		BudgetResetAt:     vk.BudgetResetAt,
-		RateLimit:         vk.RateLimit,
-		RateLimitWindow:   vk.RateLimitWindow,
-		Providers:         vk.Providers,
-		Status:            vk.Status,
-		CreatedAt:         vk.CreatedAt,
-		UpdatedAt:         vk.UpdatedAt,
+		ID:                   vk.ID,
+		TenantID:             vk.TenantID,
+		CreatedByUserID:      vk.CreatedByUserID,
+		CreatedByUsername:    vk.CreatedByUsername,
+		Name:                 vk.Name,
+		KeyHashPrefix:        vk.HashedKey + "...",
+		BudgetTotal:          vk.BudgetTotal,
+		BudgetUsed:           vk.BudgetUsed,
+		BudgetRemaining:      vk.BudgetTotal - vk.BudgetUsed,
+		BudgetResetAt:        vk.BudgetResetAt,
+		RateLimit:            vk.RateLimit,
+		RateLimitWindow:      vk.RateLimitWindow,
+		TokenLimitPerMinute:  vk.TokenLimitPerMinute,
+		MaxConcurrentStreams: vk.MaxConcurrentStreams,
+		Providers:            vk.Providers,
+		Status:               vk.Status,
+		CreatedAt:            vk.CreatedAt,
+		UpdatedAt:            vk.UpdatedAt,
 	}
 
 	if fullKey != "" {

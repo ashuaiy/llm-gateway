@@ -9,6 +9,8 @@
 
 LLM Gateway 是一个用 Go 构建的统一 LLM API 网关：用一套 OpenAI-compatible API 接入多个模型服务，并提供虚拟密钥、用量统计、缓存、路由和管理后台。
 
+新增可选治理模块：AC/正则安全策略、PII 脱敏与回复还原、跨 SSE 输出审查、Redis Lua 预算预占、可恢复账单队列、管理核对及 Key 级 RPM/TPM/并发流限制。启用步骤、BricksLLM/new-api 对照与支持范围见 [治理说明](docs/governance-development.md)，并发透支对比和强杀恢复证据见 [实测报告](docs/governance-performance.md)。
+
 ## 你可以用它做什么
 
 - 用 `/v1/chat/completions` 等 OpenAI-compatible 接口统一调用不同 provider

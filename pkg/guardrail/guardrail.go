@@ -42,6 +42,18 @@ func NewManagerFromConfig(enabled bool, configs []types.GuardrailConfig) (*Guard
 		}
 
 		switch strings.ToLower(strings.TrimSpace(cfg.Type)) {
+		case "response_policy":
+			policy, err := newResponsePolicy(cfg.Parameters)
+			if err != nil {
+				return nil, err
+			}
+			manager.RegisterGuardrail(policy)
+		case "request_policy":
+			policy, err := newRequestPolicy(cfg.Parameters)
+			if err != nil {
+				return nil, err
+			}
+			manager.RegisterGuardrail(policy)
 		case "pii", "pii_detector":
 			manager.RegisterGuardrail(NewPIIDetector())
 		case "keyword", "keyword_filter":
@@ -82,6 +94,7 @@ func (m *GuardrailManager) ValidateRequest(req any) (*types.GuardrailResult, err
 	if !m.Enabled() || m.Empty() {
 		return &types.GuardrailResult{Passed: true}, nil
 	}
+	combined := &types.GuardrailResult{Passed: true}
 	for _, g := range m.guardrails {
 		result, err := g.ValidateRequest(req)
 		if err != nil {
@@ -96,8 +109,28 @@ func (m *GuardrailManager) ValidateRequest(req any) (*types.GuardrailResult, err
 			}
 			return result, nil
 		}
+		if result != nil {
+			if len(result.Replacements) > 0 {
+				if combined.Replacements == nil {
+					combined.Replacements = map[string]string{}
+				}
+				for token, value := range result.Replacements {
+					combined.Replacements[token] = value
+				}
+			}
+			combined.Actions = append(combined.Actions, result.Actions...)
+			combined.Findings = append(combined.Findings, result.Findings...)
+			if result.MaskedContent != "" {
+				combined.MaskedContent = result.MaskedContent
+				decoder := json.NewDecoder(strings.NewReader(result.MaskedContent))
+				decoder.UseNumber()
+				if err := decoder.Decode(&req); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
-	return &types.GuardrailResult{Passed: true}, nil
+	return combined, nil
 }
 
 func (m *GuardrailManager) ValidateResponse(resp any) (*types.GuardrailResult, error) {
@@ -341,7 +374,7 @@ func stringParam(params map[string]any, key, fallback string) string {
 	if params == nil {
 		return fallback
 	}
-	if value, ok := params[key].(string); ok && value != "" {
+	if value, ok := parameterValue(params, key).(string); ok && value != "" {
 		return value
 	}
 	return fallback
@@ -351,7 +384,7 @@ func boolParam(params map[string]any, key string, fallback bool) bool {
 	if params == nil {
 		return fallback
 	}
-	if value, ok := params[key].(bool); ok {
+	if value, ok := parameterValue(params, key).(bool); ok {
 		return value
 	}
 	return fallback
@@ -361,7 +394,7 @@ func intParam(params map[string]any, key string, fallback int) int {
 	if params == nil {
 		return fallback
 	}
-	switch value := params[key].(type) {
+	switch value := parameterValue(params, key).(type) {
 	case int:
 		return value
 	case int64:
@@ -381,7 +414,7 @@ func stringSliceParam(params map[string]any, key string) []string {
 	if params == nil {
 		return nil
 	}
-	switch values := params[key].(type) {
+	switch values := parameterValue(params, key).(type) {
 	case []string:
 		return values
 	case []any:
@@ -408,4 +441,16 @@ func stringSliceParam(params map[string]any, key string) []string {
 	default:
 		return nil
 	}
+}
+
+func parameterValue(params map[string]any, key string) any {
+	if value, ok := params[key]; ok {
+		return value
+	}
+	for candidate, value := range params {
+		if strings.EqualFold(candidate, key) {
+			return value
+		}
+	}
+	return nil
 }

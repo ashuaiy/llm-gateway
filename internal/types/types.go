@@ -169,6 +169,15 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
+// TokenUsage is shared by the proxy and accounting middleware. Source explicitly
+// distinguishes upstream counts from local estimates; estimates are not bills.
+type TokenUsage struct {
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+	Source           string `json:"-"`
+}
+
 // CompletionRequest 补全请求
 type CompletionRequest struct {
 	Model            string   `json:"model" binding:"required"`
@@ -247,9 +256,11 @@ type StreamResponse struct {
 
 // GuardrailResult 护栏检查结果
 type GuardrailResult struct {
-	Passed        bool     `json:"passed"`
-	Message       string   `json:"message,omitempty"`
-	Reason        string   `json:"reason,omitempty"`
-	Actions       []string `json:"actions,omitempty"`
-	MaskedContent string   `json:"maskedContent,omitempty"`
+	Replacements  map[string]string `json:"-"`
+	Findings      []string          `json:"findings,omitempty"`
+	Passed        bool              `json:"passed"`
+	Message       string            `json:"message,omitempty"`
+	Reason        string            `json:"reason,omitempty"`
+	Actions       []string          `json:"actions,omitempty"`
+	MaskedContent string            `json:"maskedContent,omitempty"`
 }

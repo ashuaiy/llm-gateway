@@ -17,8 +17,9 @@ import (
 
 // VirtualKeyHandler handles virtual key API requests
 type VirtualKeyHandler struct {
-	service *service.VirtualKeyService
-	db      *gorm.DB
+	ReservationEnabled bool
+	service            *service.VirtualKeyService
+	db                 *gorm.DB
 }
 
 const tenantUserDefaultBudgetTotal = 500
@@ -353,6 +354,10 @@ func (h *VirtualKeyHandler) Delete(c *gin.Context) {
 // @Security BearerAuth
 // @Router /api/v1/virtual-keys/{id}/reset [post]
 func (h *VirtualKeyHandler) Reset(c *gin.Context) {
+	if h.ReservationEnabled {
+		c.AbortWithStatusJSON(http.StatusConflict, types.ErrorResponse{Type: "budget_reset_unsupported", Message: "Budget reset requires coordinated reconciliation in reservation mode"})
+		return
+	}
 	if currentRole(c) == models.RoleTenantUser {
 		c.AbortWithStatusJSON(http.StatusForbidden, types.ErrorResponse{
 			Message: "tenant_user cannot reset virtual keys",

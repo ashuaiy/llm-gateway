@@ -1,0 +1,46 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: local-test-root
+      MYSQL_DATABASE: gateway
+      MYSQL_USER: gateway
+      MYSQL_PASSWORD: local-test-only
+    healthcheck:
+      test: [CMD, mysqladmin, ping, -h, localhost, -plocal-test-root]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  redis:
+    image: redis:7.4
+    command: [redis-server, --appendonly, "yes", --maxmemory-policy, noeviction]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+  verify:
+    image: golang:1.26.4-bookworm
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - governance-go-mod:/go/pkg/mod
+      - governance-go-build:/root/.cache/go-build
+    environment:
+      LLM_GATEWAY_TEST_REDIS: redis:6379
+      LLM_GATEWAY_TEST_MYSQL: gateway:local-test-only@tcp(mysql:3306)/gateway?parseTime=true
+      LLM_GATEWAY_RUN_LOAD: ${LLM_GATEWAY_RUN_LOAD:-0}
+      LLM_GATEWAY_BENCH_REPORT: ${LLM_GATEWAY_BENCH_REPORT:-}
+      GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - go test ./... -count=1 && LLM_GATEWAY_RUN_LOAD=0 go test -race ./internal/billing ./internal/limits ./pkg/proxy ./pkg/guardrail ./internal/middleware ./tests/governance -count=1 && go build -o /tmp/llm-gateway ./cmd/server
+volumes:
+  governance-go-mod:
+  governance-go-build:

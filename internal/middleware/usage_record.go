@@ -14,6 +14,7 @@ import (
 	"github.com/warm3snow/llm-gateway/internal/metrics"
 	"github.com/warm3snow/llm-gateway/internal/models"
 	"github.com/warm3snow/llm-gateway/internal/service"
+	"github.com/warm3snow/llm-gateway/internal/types"
 )
 
 // StreamUsageKey is the gin context key under which the streaming proxy
@@ -24,11 +25,7 @@ const StreamUsageKey = "stream_usage"
 // an import cycle (pkg/proxy already imports internal/middleware indirectly
 // via the gin context only — but the struct lives here for the middleware's
 // own use).
-type streamUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
+type streamUsage = types.TokenUsage
 
 var defaultPricingCache = newPricingCache(5*time.Minute, 30*time.Second)
 
@@ -191,7 +188,7 @@ func UsageRecordMiddlewareWithBudgetTracker(cfg *config.Config, virtualKeyServic
 		// Apply the virtual key's budget usage. Prefer the async tracker so request
 		// latency is not coupled to the budget UPDATE; fall back to synchronous
 		// TrackUsage if the queue is full or async tracking is not configured.
-		if virtualKeyID != nil && cost > 0 {
+		if virtualKeyID != nil && cost > 0 && !c.GetBool("budget_managed") {
 			trackStart := time.Now()
 			trackResult := trackVirtualKeyBudget(*virtualKeyID, cost, virtualKeyService, budgetTracker)
 			metrics.RecordUsageTrackUsage(trackResult, time.Since(trackStart))

@@ -32,6 +32,17 @@ database:
     maxIdleConns: 25
     connMaxLifetime: 30m0s
 budget:
+    reservationRetention: 24h
+    reconciliationStaleAfter: 10m
+    workerConcurrency: 4
+    deliveryBatchSize: 100
+    reservationEnabled: false
+    reservationRedis:
+        addr: localhost:6379
+        password: ""
+        db: 1
+    reservationDefaultMaxTokens: 1024
+    reservationMaxOutputTokens: 8192
     asyncEnabled: true
     queueSize: 10000
     batchSize: 500

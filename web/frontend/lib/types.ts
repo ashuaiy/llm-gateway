@@ -1,6 +1,25 @@
 // Shared TypeScript types — match backend snake_case JSON field names.
 // Source of truth for all API responses consumed by the frontend.
 
+export interface BillingResolution {
+  resolution_id: string;
+  actor?: string;
+  action: 'settle' | 'release';
+  input_tokens: number;
+  output_tokens: number;
+  reason: string;
+  evidence: string;
+}
+export interface BillingJob {
+  reservation: { id: string; key_id: number; tenant_id: number; provider: string; model: string; amount: number; input_rate: number; output_rate: number };
+  settlement: { actual: number; input_tokens: number; output_tokens: number; source: string };
+  state: string;
+  created_millis: number;
+  unresolved_reason?: string;
+  reported_settlement?: { actual: number; input_tokens: number; output_tokens: number; source: string };
+  resolution?: BillingResolution;
+}
+
 export interface DashboardStats {
   totalRequests: number;
   totalTokens: number;
@@ -58,6 +77,8 @@ export interface VirtualKey {
   budget_remaining?: number;
   rate_limit?: number;
   rate_limit_window?: number;
+  token_limit_per_minute?: number;
+  max_concurrent_streams?: number;
   providers?: string;
   status: string;
   created_at: string;

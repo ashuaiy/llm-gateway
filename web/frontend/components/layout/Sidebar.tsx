@@ -13,6 +13,7 @@ import {
   TerminalSquare,
   Building2,
   Users,
+  Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, currentRole } from "@/lib/api";
@@ -20,6 +21,7 @@ import { useStats } from "@/lib/queries";
 import { useState } from "react";
 
 const routes = [
+  { href: "/billing", label: "Billing review", code: "bill", icon: Wallet, roles: ["super_admin", "tenant_admin"] },
   {
     href: "/dashboard",
     label: "Dashboard",

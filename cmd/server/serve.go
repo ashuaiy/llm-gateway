@@ -16,12 +16,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
+	"github.com/warm3snow/llm-gateway/internal/billing"
 	"github.com/warm3snow/llm-gateway/internal/config"
 	"github.com/warm3snow/llm-gateway/internal/database"
 	"github.com/warm3snow/llm-gateway/internal/handler"
+	"github.com/warm3snow/llm-gateway/internal/limits"
 	"github.com/warm3snow/llm-gateway/internal/logging"
 	"github.com/warm3snow/llm-gateway/internal/logstore"
 	"github.com/warm3snow/llm-gateway/internal/middleware"
@@ -127,6 +130,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		&models.ModelPricing{},
 	)
 	if migrateErr != nil {
+		if cfg.Budget.ReservationEnabled {
+			return fmt.Errorf("billing schema migration failed: %w", migrateErr)
+		}
 		log.Printf("Warning: Failed to run migration: %v", migrateErr)
 	}
 	defer database.Close()
@@ -217,11 +223,35 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// 创建代理处理器
 	proxyHandler := proxy.NewProxyHandler(cfg, cacheInstance)
 	proxyHandler.SetGuardrailManager(guardrailManager)
+	if cfg.Budget.ReservationEnabled {
+		if err := database.Migrate(&billing.Ledger{}); err != nil {
+			return fmt.Errorf("billing migration failed: %w", err)
+		}
+		redisCfg := cfg.Budget.ReservationRedis
+		client := redis.NewClient(&redis.Options{Addr: redisCfg.Addr, Password: redisCfg.Password, DB: redisCfg.DB, DialTimeout: 3 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second})
+		defer client.Close()
+		checkCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := client.Ping(checkCtx).Err()
+		cancel()
+		if err != nil {
+			return fmt.Errorf("billing Redis unavailable: %w", err)
+		}
+		store := billing.NewStore(client, "llm-gateway:{billing-v1}:")
+		store.StaleAfter = cfg.Budget.ReconciliationStaleAfter
+		proxyHandler.Limiter = &limits.Limiter{Client: client, Prefix: "llm-gateway:limits:", LeaseTTL: 30 * time.Second}
+		proxyHandler.Billing = &billing.Service{Store: store, DB: database.GetDB(), DefaultMaxTokens: cfg.Budget.ReservationDefaultMaxTokens, MaxOutputTokens: cfg.Budget.ReservationMaxOutputTokens}
+		worker := &billing.Worker{Store: store, DB: database.GetDB(), Retention: cfg.Budget.ReservationRetention, Concurrency: cfg.Budget.WorkerConcurrency, BatchSize: cfg.Budget.DeliveryBatchSize}
+		workerCtx, stopWorker := context.WithCancel(context.Background())
+		workerDone := make(chan struct{})
+		go func() { defer close(workerDone); worker.Run(workerCtx) }()
+		defer func() { stopWorker(); <-workerDone }()
+		log.Printf("[BUDGET] Redis reservations enabled; text chat only, cache bypassed")
+	}
 
 	// VirtualKeyService for budget tracking on usage records.
 	virtualKeyService := service.NewVirtualKeyService()
 	var budgetTracker *service.BudgetTracker
-	if cfg.Budget.AsyncEnabled {
+	if cfg.Budget.AsyncEnabled && !cfg.Budget.ReservationEnabled {
 		budgetTracker = service.NewBudgetTracker(database.GetDB(), service.BudgetTrackerOptions{
 			QueueSize:     cfg.Budget.QueueSize,
 			BatchSize:     cfg.Budget.BatchSize,
@@ -239,6 +269,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// API 路由（需要虚拟密钥认证 + 缓存 + 用量记录）
 	v1 := router.Group("/v1")
 	v1.Use(middleware.VirtualKeyAuthWithBudgetTracker(cfg, budgetTracker))
+	v1.Use(middleware.BudgetReservationGate(cfg.Budget.ReservationEnabled))
 	v1.Use(middleware.GuardrailMiddleware(guardrailManager))
 	v1.Use(middleware.IdempotencyMiddleware(service.NewIdempotencyService(), 24*time.Hour))
 	v1.Use(middleware.UsageRecordMiddlewareWithBudgetTracker(cfg, virtualKeyService, budgetTracker))
@@ -262,6 +293,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// JWT 中间件（用于保护管理接口）
 	jwtMiddleware := middleware.JWTAuth(cfg)
+	if proxyHandler.Billing != nil {
+		(&handler.BillingHandler{Store: proxyHandler.Billing.Store, DB: database.GetDB()}).RegisterRoutesWithAuth(router, jwtMiddleware)
+	}
 
 	// 管理界面路由（需要JWT保护）
 	adminHandler := handler.NewHandler(cfg)
@@ -281,6 +315,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// 虚拟密钥路由（需要JWT保护）
 	vkHandler := handler.NewVirtualKeyHandler()
+	vkHandler.ReservationEnabled = cfg.Budget.ReservationEnabled
 	vkHandler.RegisterRoutesWithAuth(router, jwtMiddleware)
 
 	// 告警路由（需要JWT保护）

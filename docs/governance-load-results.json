@@ -1,0 +1,63 @@
+{
+  "arch": "amd64",
+  "gateway_instances": 2,
+  "go": "go1.26.4",
+  "logical_cpus": 12,
+  "os": "linux",
+  "provider": "local fake SSE, 10 ms delay for capacity run; synchronized barrier for budget race",
+  "recorded_at": "2026-11-17T06:52:47Z",
+  "results": [
+    {
+      "mode": "reservations=false,barrier=true",
+      "requests": 100,
+      "concurrency": 100,
+      "http_status": {
+        "200": 100
+      },
+      "rps": 169.88967108226512,
+      "p50_ms": 466.085,
+      "p95_ms": 567.13,
+      "p99_ms": 582.936,
+      "budget_usd": 10,
+      "spent_usd": 100,
+      "overspend_usd": 90,
+      "outbox_drain_ms": 0,
+      "ledgers": 0
+    },
+    {
+      "mode": "reservations=true,barrier=true",
+      "requests": 100,
+      "concurrency": 100,
+      "http_status": {
+        "200": 10,
+        "403": 90
+      },
+      "rps": 695.4652763889239,
+      "p50_ms": 112.993,
+      "p95_ms": 141.917,
+      "p99_ms": 142.834,
+      "budget_usd": 10,
+      "spent_usd": 10,
+      "overspend_usd": 0,
+      "outbox_drain_ms": 121.738,
+      "ledgers": 10
+    },
+    {
+      "mode": "reservations=true,barrier=false",
+      "requests": 1000,
+      "concurrency": 64,
+      "http_status": {
+        "200": 1000
+      },
+      "rps": 791.1955931620737,
+      "p50_ms": 75.895,
+      "p95_ms": 109.465,
+      "p99_ms": 119.538,
+      "budget_usd": 100000,
+      "spent_usd": 1000,
+      "overspend_usd": 0,
+      "outbox_drain_ms": 4831.997,
+      "ledgers": 1000
+    }
+  ]
+}

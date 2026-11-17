@@ -1,6 +1,8 @@
 import { getCookie, setCookie, deleteCookie } from 'cookies-next';
 import { QueryClient } from '@tanstack/react-query';
 import type {
+  BillingJob,
+  BillingResolution,
   DashboardStats,
   ProvidersResponse,
   ProviderHealthResponse,
@@ -63,6 +65,9 @@ async function apiFetch<T>(endpoint: string, options: RequestInit = {}): Promise
 }
 
 export const api = {
+  getBillingReservations: (offset = 0) => apiFetch<{ reservations: BillingJob[]; next_offset: number }>(`/api/v1/billing/reservations?offset=${offset}&limit=50`),
+  getBillingReservation: (id: string) => apiFetch<{ reservation: BillingJob; from_ledger: boolean }>(`/api/v1/billing/reservations/${encodeURIComponent(id)}`),
+  reconcileReservation: (id: string, data: BillingResolution) => apiFetch<{ status: string }>(`/api/v1/billing/reservations/${encodeURIComponent(id)}/reconcile`, { method: 'POST', body: JSON.stringify(data) }),
   login: (data: { username: string; password: string }) =>
     apiFetch<LoginResponse>('/api/v1/auth/login', {
       method: 'POST',
@@ -160,7 +165,7 @@ export const api = {
     apiFetch<void>(`/api/v1/admin/providers/${encodeURIComponent(name)}`, {
       method: 'DELETE',
     }),
-  createVirtualKey: (data: { name: string; budget_total?: number; rate_limit?: number; rate_limit_window?: number }) =>
+  createVirtualKey: (data: { name: string; budget_total?: number; rate_limit?: number; rate_limit_window?: number; token_limit_per_minute?: number; max_concurrent_streams?: number }) =>
     apiFetch<VirtualKey>('/api/v1/virtual-keys', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -170,6 +175,8 @@ export const api = {
     budget_total?: number;
     rate_limit?: number;
     rate_limit_window?: number;
+    token_limit_per_minute?: number;
+    max_concurrent_streams?: number;
     providers?: string[];
   }) =>
     apiFetch<VirtualKey>(`/api/v1/virtual-keys/${id}`, {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -46,37 +45,18 @@ func newRootCmd() *cobra.Command {
 // Called from each subcommand's PreRunE (rather than rootCmd.PersistentPreRunE)
 // so that `--help` and unknown args don't trigger DB connection.
 func persistentLoad() error {
-	cfg, err := config.LoadConfig(config.GetConfigPath())
-	if err != nil {
-		log.Printf("Warning: Failed to load config: %v, using defaults", err)
-		cfg = &config.Config{
-			Server: config.ServerConfig{
-				Host:         "0.0.0.0",
-				Port:         8080,
-				ReadTimeout:  60 * 1000 * 1000 * 1000, // 60s
-				WriteTimeout: 60 * 1000 * 1000 * 1000,
-			},
-			Gateway: config.GatewayConfig{
-				DefaultProvider:   "openai",
-				GuardrailsEnabled: true,
-			},
-			Database: config.DatabaseConfig{
-				Driver:          "sqlite",
-				DSN:             "llm-gateway.db",
-				LogLevel:        "warn",
-				MaxOpenConns:    50,
-				MaxIdleConns:    25,
-				ConnMaxLifetime: 30 * 60 * 1000 * 1000 * 1000,
-			},
-			Budget: config.BudgetConfig{
-				AsyncEnabled:  true,
-				QueueSize:     10000,
-				BatchSize:     500,
-				FlushInterval: 250 * 1000 * 1000,
-				FlushTimeout:  5 * 1000 * 1000 * 1000,
-			},
+	path := config.GetConfigPath()
+	if configFile != "" {
+		path = configFile
+		if _, err := os.Stat(path); err != nil {
+			return fmt.Errorf("cannot read --config: %w", err)
 		}
 	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		return err
+	}
+
 	loadedConfig = cfg
 
 	dbCfg := &database.Config{

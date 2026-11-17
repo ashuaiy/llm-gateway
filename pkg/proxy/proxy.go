@@ -3,16 +3,20 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	pathpkg "path"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/warm3snow/llm-gateway/internal/billing"
 	"github.com/warm3snow/llm-gateway/internal/config"
+	"github.com/warm3snow/llm-gateway/internal/limits"
 	"github.com/warm3snow/llm-gateway/internal/metrics"
 	"github.com/warm3snow/llm-gateway/internal/provider"
 	"github.com/warm3snow/llm-gateway/internal/service"
@@ -24,6 +28,8 @@ import (
 
 // ProxyHandler 代理处理器
 type ProxyHandler struct {
+	Billing          *billing.Service
+	Limiter          *limits.Limiter
 	Config           *config.Config
 	ProviderFactory  *provider.ProviderFactory
 	Retryer          *retry.Retryer
@@ -52,6 +58,14 @@ func (h *ProxyHandler) SetGuardrailManager(manager *guardrail.GuardrailManager) 
 
 // HandleChatCompletion 处理聊天补全请求
 func (h *ProxyHandler) HandleChatCompletion(c *gin.Context) {
+	start := time.Now()
+	maxDuration := 120 * time.Second
+	if h.Config.Gateway.MaxRequestTimeout > 0 {
+		maxDuration = time.Duration(h.Config.Gateway.MaxRequestTimeout) * time.Millisecond
+	}
+	requestCtx, cancelRequest := context.WithTimeout(c.Request.Context(), maxDuration)
+	defer cancelRequest()
+	c.Request = c.Request.WithContext(requestCtx)
 	var req types.ChatCompletionRequest
 
 	// 解析请求
@@ -60,6 +74,15 @@ func (h *ProxyHandler) HandleChatCompletion(c *gin.Context) {
 		return
 	}
 
+	if c.GetBool("force_stream") {
+		req.Stream = true
+	}
+	if req.Stream {
+		if req.StreamOptions == nil {
+			req.StreamOptions = &types.StreamOptions{}
+		}
+		req.StreamOptions.IncludeUsage = true
+	}
 	// 获取配置
 	opts := h.getOptionsFromContext(c)
 	finishSelection := func() {}
@@ -87,10 +110,21 @@ func (h *ProxyHandler) HandleChatCompletion(c *gin.Context) {
 	}
 
 	// 发送请求
+	finishLimits, allowed := h.beginLimits(c, &req)
+	if !allowed {
+		return
+	}
+	defer finishLimits()
+	session, ok := h.beginBudget(c, &req, opts)
+	if !ok {
+		return
+	}
+	defer h.finishBudget(c, session)
 	ctx := c.Request.Context()
 	var resp *http.Response
 	var respErr error
 
+	c.Set("budget_upstream_attempted", true)
 	if opts.Retry != nil {
 		// 使用重试
 		resp, respErr = h.Retryer.DoWithProvider(ctx, opts.Provider, func() (*http.Response, error) {
@@ -107,6 +141,12 @@ func (h *ProxyHandler) HandleChatCompletion(c *gin.Context) {
 	defer resp.Body.Close()
 
 	// 处理响应
+	if req.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		h.streamResponse(c, resp, &req, opts.Provider, start)
+		return
+	}
 	h.handleResponse(c, resp)
 }
 
@@ -242,10 +282,27 @@ func (h *ProxyHandler) HandleModels(c *gin.Context) {
 // handleResponse 处理响应
 func (h *ProxyHandler) handleResponse(c *gin.Context, resp *http.Response) {
 	// 读取响应体
-	body, err := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+	bounded := c.GetBool("pii_restore") || (h.shouldApplyResponseGuardrail(c, resp.StatusCode) && h.GuardrailManager.NewStreamFilter() != nil)
+	if bounded {
+		reader = io.LimitReader(reader, (1<<20)+1)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		h.abortWithError(c, http.StatusInternalServerError, "response_error", fmt.Sprintf("Failed to read response: %v", err))
 		return
+	}
+	if bounded && len(body) > 1<<20 {
+		h.abortWithError(c, http.StatusBadGateway, "response_too_large", "Response inspection exceeds 1 MiB")
+		return
+	}
+
+	// Capture authoritative usage even if a response guardrail rejects the body.
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if u := extractUsageFromChunk(body); u != nil {
+			u.Source = "provider"
+			c.Set("stream_usage", *u)
+		}
 	}
 
 	if h.shouldApplyResponseGuardrail(c, resp.StatusCode) {
@@ -400,68 +457,8 @@ func (h *ProxyHandler) getTargetURL(c *gin.Context) string {
 
 // HandleStreamRequest 处理流式请求
 func (h *ProxyHandler) HandleStreamRequest(c *gin.Context) {
-	// Capture start as early as possible so TTFT reflects the full time the
-	// client waited for the first streamed token.
-	start := time.Now()
-
-	// 设置 SSE 头
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-
-	// 解析请求
-	var req types.ChatCompletionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		h.abortWithError(c, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("Invalid request: %v", err))
-		return
-	}
-
-	// 获取 provider
-	opts := h.getOptionsFromContext(c)
-	finishSelection := func() {}
-	if isAutoModel(req.Model) {
-		if !h.autoModeEnabled() {
-			h.abortWithError(c, http.StatusBadRequest, "invalid_request_error", "auto mode is disabled")
-			return
-		}
-		selection, done, err := h.selectAutoModel(c, &req)
-		if err != nil {
-			h.abortWithError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-			return
-		}
-		opts = &selection.Options
-		req.Model = selection.Model
-		finishSelection = done
-	}
-	defer finishSelection()
-
-	prov, err := h.ProviderFactory.Create(opts.Provider, opts)
-	if err != nil {
-		h.abortWithError(c, http.StatusInternalServerError, "provider_error", fmt.Sprintf("Failed to create provider: %v", err))
-		return
-	}
-
-	// 强制设置 stream 为 true
-	req.Stream = true
-	// Inject stream_options.include_usage so OpenAI-compatible upstreams return
-	// a final chunk carrying the `usage` block. Without this, streaming requests
-	// never report token counts and UsageRecordMiddleware records 0 tokens.
-	if req.StreamOptions == nil {
-		req.StreamOptions = &types.StreamOptions{}
-	}
-	req.StreamOptions.IncludeUsage = true
-
-	// 发送请求
-	ctx := c.Request.Context()
-	resp, err := prov.ChatCompletion(ctx, &req, opts)
-	if err != nil {
-		h.abortWithError(c, http.StatusInternalServerError, "request_error", fmt.Sprintf("Request failed: %v", err))
-		return
-	}
-	defer resp.Body.Close()
-
-	// 流式传输响应
-	h.streamResponse(c, resp, &req, opts.Provider, start)
+	c.Set("force_stream", true)
+	h.HandleChatCompletion(c)
 }
 
 // streamResponse 流式传输响应，同时解析 SSE 事件中的 usage 字段。
@@ -497,21 +494,48 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, req *
 		model = req.Model
 	}
 
+	defer func() {
+		// 上游未发送 usage 时，做字符近似估算。
+		if !sawUsage {
+			promptTokens := estimateTokens(promptTextFromRequest(req))
+			completionTokens := estimateTokens(contentBuf.String())
+			if promptTokens > 0 || completionTokens > 0 {
+				c.Set(StreamUsageKey, streamUsage{
+					Source:           "estimated",
+					PromptTokens:     promptTokens,
+					CompletionTokens: completionTokens,
+					TotalTokens:      promptTokens + completionTokens,
+				})
+			}
+		}
+	}()
+	outputFilter := h.GuardrailManager.NewStreamFilter()
+	writeFrames := func(frames [][]byte) bool {
+		for _, frame := range frames {
+			if _, err := c.Writer.Write(frame); err != nil {
+				return false
+			}
+			if !bytes.HasSuffix(frame, []byte("\n\n")) {
+				if _, err := c.Writer.Write([]byte("\n\n")); err != nil {
+					return false
+				}
+			}
+			flusher.Flush()
+		}
+		return true
+	}
+	blockOutput := func() {
+		c.Set("output_blocked", true)
+		slog.Warn("guardrail_output_blocked", "virtual_key_id", c.GetUint("virtual_key_id"))
+		_, _ = c.Writer.Write([]byte("event: error\ndata: {\"error\":{\"type\":\"output_blocked\",\"message\":\"Response stopped by output policy\"}}\n\n"))
+		flusher.Flush()
+	}
+
 	for scanner.Scan() {
 		event := scanner.Bytes()
 		if len(event) == 0 {
 			continue
 		}
-		// Forward the event to the client unchanged.
-		if _, err := c.Writer.Write(event); err != nil {
-			return
-		}
-		// Ensure events end with the SSE delimiter so the client sees them.
-		if !bytes.HasSuffix(event, []byte("\n\n")) {
-			c.Writer.Write([]byte("\n\n"))
-		}
-		flusher.Flush()
-
 		// Inspect data: lines for a usage payload.
 		// SSE event format: optional "event:" / "id:" / "retry:" lines plus
 		// one or more "data:" lines, terminated by a blank line.
@@ -527,7 +551,8 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, req *
 			// Try to extract a top-level "usage" object from the chunk.
 			// OpenAI sends usage only on the final chunk when
 			// stream_options.include_usage=true.
-			if u := extractUsageFromChunk(payload); u != nil {
+			if u := extractFinalStreamUsage(payload); u != nil {
+				u.Source = "provider"
 				c.Set(StreamUsageKey, *u)
 				sawUsage = true
 			}
@@ -543,42 +568,69 @@ func (h *ProxyHandler) streamResponse(c *gin.Context, resp *http.Response, req *
 				contentBuf.Write(content)
 			}
 		}
-	}
+		frames := [][]byte{event}
+		if outputFilter != nil {
+			var err error
+			frames, err = outputFilter.Feed(event)
+			if err != nil {
+				blockOutput()
+				return
+			}
+		}
+		if !writeFrames(frames) {
+			return
+		}
 
-	// 上游未发送 usage 时，做字符近似估算。
-	if !sawUsage {
-		promptTokens := estimateTokens(promptTextFromRequest(req))
-		completionTokens := estimateTokens(contentBuf.String())
-		if promptTokens > 0 || completionTokens > 0 {
-			c.Set(StreamUsageKey, streamUsage{
-				PromptTokens:     promptTokens,
-				CompletionTokens: completionTokens,
-				TotalTokens:      promptTokens + completionTokens,
-			})
+		if c.Request.Context().Err() != nil {
+			return
 		}
 	}
+	if outputFilter != nil && scanner.Err() == nil && c.Request.Context().Err() == nil {
+		frames, err := outputFilter.Finish()
+		if err != nil {
+			blockOutput()
+			return
+		}
+		writeFrames(frames)
+	}
+
 }
 
 // streamUsage carries the token counts extracted from a streaming chunk.
-type streamUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
+type streamUsage = types.TokenUsage
 
 // extractUsageFromChunk parses a single SSE data payload (JSON) and returns
 // the usage block if present.
 func extractUsageFromChunk(payload []byte) *streamUsage {
 	var chunk struct {
-		Usage *streamUsage `json:"usage"`
+		Usage *struct {
+			Prompt     *int `json:"prompt_tokens"`
+			Completion *int `json:"completion_tokens"`
+			Total      *int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(payload, &chunk); err != nil {
 		return nil
 	}
-	if chunk.Usage == nil {
+	u := chunk.Usage
+	if u == nil || u.Prompt == nil || u.Completion == nil || u.Total == nil || *u.Prompt < 0 || *u.Completion < 0 || *u.Total < 0 || *u.Prompt > *u.Total || *u.Completion != *u.Total-*u.Prompt {
 		return nil
 	}
-	return chunk.Usage
+	return &streamUsage{PromptTokens: *u.Prompt, CompletionTokens: *u.Completion, TotalTokens: *u.Total}
+}
+
+func extractFinalStreamUsage(payload []byte) *streamUsage {
+	var event struct {
+		Choices *[]json.RawMessage `json:"choices"`
+	}
+	if json.Unmarshal(payload, &event) != nil {
+		return nil
+	}
+	// With include_usage, the OpenAI-compatible final usage event has no choices.
+	if event.Choices == nil || len(*event.Choices) != 0 {
+		return nil
+	}
+	return extractUsageFromChunk(payload)
 }
 
 // extractContentDelta extracts the `.delta.content` string from a streaming
@@ -650,12 +702,17 @@ func scanSSEEvents(data []byte, atEOF bool) (advance int, token []byte, err erro
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
 	}
-	// Look for the event delimiter.
-	idx := bytes.Index(data, []byte("\n\n"))
-	if idx >= 0 {
-		// Include the trailing "\n\n" in the token.
-		end := idx + 2
-		return end, data[0:end], nil
+	// A blank line ends the event. Accept both LF and CRLF without merging
+	// adjacent JSON payloads (which would lose authoritative final usage).
+	lineStart := 0
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		if i == lineStart || (i == lineStart+1 && data[lineStart] == '\r') {
+			return i + 1, data[:i+1], nil
+		}
+		lineStart = i + 1
 	}
 	// If at EOF, return the remaining data as a final token.
 	if atEOF {

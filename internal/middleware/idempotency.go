@@ -22,7 +22,7 @@ const idempotencyKeyHeader = "Idempotency-Key"
 func IdempotencyMiddleware(idempotencyService *service.IdempotencyService, ttl time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := strings.TrimSpace(c.GetHeader(idempotencyKeyHeader))
-		if key == "" || idempotencyService == nil || !isIdempotencySupportedRequest(c) {
+		if c.GetBool("pii_restore") || key == "" || idempotencyService == nil || !isIdempotencySupportedRequest(c) {
 			c.Next()
 			return
 		}
@@ -82,6 +82,9 @@ func IdempotencyMiddleware(idempotencyService *service.IdempotencyService, ttl t
 }
 
 func isIdempotencySupportedRequest(c *gin.Context) bool {
+	if c.GetBool("request_is_stream") {
+		return false
+	}
 	if c.Request.Method != http.MethodPost {
 		return false
 	}

@@ -144,7 +144,7 @@ func VirtualKeyAuthWithBudgetTracker(cfg *config.Config, budgetTracker *service.
 		if budgetTracker != nil {
 			pendingBudget = budgetTracker.Pending(matchedKey.ID)
 		}
-		if matchedKey.BudgetTotal > 0 && matchedKey.BudgetUsed+pendingBudget >= matchedKey.BudgetTotal {
+		if (cfg == nil || !cfg.Budget.ReservationEnabled) && matchedKey.BudgetTotal > 0 && matchedKey.BudgetUsed+pendingBudget >= matchedKey.BudgetTotal {
 			authCache.evictPositive(cacheDigest)
 			metricResult = "budget_exceeded"
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
@@ -189,6 +189,7 @@ func VirtualKeyAuthWithBudgetTracker(cfg *config.Config, budgetTracker *service.
 		}
 
 		// Set context values for downstream handlers
+		c.Set("budget_virtual_key", *matchedKey)
 		c.Set("virtual_key_id", matchedKey.ID)
 		c.Set("virtual_key_name", matchedKey.Name)
 		c.Set("virtual_key_created_by_user_id", matchedKey.CreatedByUserID)
